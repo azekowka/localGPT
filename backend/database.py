@@ -3,18 +3,25 @@ import uuid
 import json
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
+import os # Import os for environment variable access
 
 class ChatDatabase:
     def __init__(self, db_path: str = None):
         if db_path is None:
-            # Auto-detect environment and set appropriate path
-            import os
-            if os.path.exists("/app"):  # Docker environment
-                self.db_path = "/app/backend/chat_data.db"
-            else:  # Local development environment
-                self.db_path = "backend/chat_data.db"
+            # Try to get path from environment variable, otherwise raise error
+            env_db_path = os.getenv("LOCALGPT_DB_PATH")
+            if env_db_path:
+                self.db_path = env_db_path
+            else:
+                raise ValueError("db_path must be provided or set via LOCALGPT_DB_PATH environment variable")
         else:
             self.db_path = db_path
+
+        # Ensure the directory for the database exists
+        db_dir = os.path.dirname(self.db_path)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+            
         self.init_database()
     
     def init_database(self):
@@ -663,30 +670,36 @@ def generate_session_title(first_message: str, max_length: int = 50) -> str:
     
     return title
 
-# Global database instance
-db = ChatDatabase()
+# Global database instance - REMOVED, now instantiated with explicit path where needed
+# db = ChatDatabase()
 
 if __name__ == "__main__":
     # Test the database
     print("🧪 Testing database...")
     
+    # For testing, provide a specific path
+    test_db_path = "test_chat_data.db"
+    if os.path.exists(test_db_path):
+        os.remove(test_db_path)
+    test_db = ChatDatabase(db_path=test_db_path)
+
     # Create a test session
-    session_id = db.create_session("Test Chat", "llama3.2:latest")
+    session_id = test_db.create_session("Test Chat", "llama3.2:latest")
     
     # Add some messages
-    db.add_message(session_id, "Hello!", "user")
-    db.add_message(session_id, "Hi there! How can I help you?", "assistant")
+    test_db.add_message(session_id, "Hello!", "user")
+    test_db.add_message(session_id, "Hi there! How can I help you?", "assistant")
     
     # Get messages
-    messages = db.get_messages(session_id)
+    messages = test_db.get_messages(session_id)
     print(f"📨 Messages: {len(messages)}")
     
     # Get sessions
-    sessions = db.get_sessions()
+    sessions = test_db.get_sessions()
     print(f"📋 Sessions: {len(sessions)}")
     
     # Get stats
-    stats = db.get_stats()
+    stats = test_db.get_stats()
     print(f"📊 Stats: {stats}")
     
     print("✅ Database test completed!")  

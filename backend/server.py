@@ -1,7 +1,7 @@
 import json
 import http.server
 import socketserver
-import cgi
+# import cgi # Removed: cgi is deprecated
 import os
 import uuid
 from urllib.parse import urlparse, parse_qs
@@ -23,7 +23,7 @@ except ImportError as e:
     print(f"⚠️ RAG system modules not available: {e}")
 
 from ollama_client import OllamaClient
-from database import db, generate_session_title
+from database import ChatDatabase, generate_session_title
 import simple_pdf_processor as pdf_module
 from simple_pdf_processor import initialize_simple_pdf_processor
 from typing import List, Dict, Any
@@ -35,6 +35,12 @@ class ReusableTCPServer(socketserver.TCPServer):
 
 class ChatHandler(http.server.BaseHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
+        # Retrieve db_path from environment variable
+        db_path_env = os.getenv("LOCALGPT_DB_PATH")
+        if not db_path_env:
+            raise ValueError("LOCALGPT_DB_PATH environment variable not set for backend/server.py")
+        self.db = ChatDatabase(db_path=db_path_env)
+
         self.ollama_client = OllamaClient()
         super().__init__(*args, **kwargs)
     
@@ -55,7 +61,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                 "status": "ok",
                 "ollama_running": self.ollama_client.is_ollama_running(),
                 "available_models": self.ollama_client.list_models(),
-                "database_stats": db.get_stats()
+                "database_stats": self.db.get_stats()
             })
         elif parsed_path.path == '/sessions':
             self.handle_get_sessions()
@@ -177,7 +183,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
     def handle_get_sessions(self):
         """Get all chat sessions"""
         try:
-            sessions = db.get_sessions()
+            sessions = self.db.get_sessions()
             self.send_json_response({
                 "sessions": sessions,
                 "total": len(sessions)
@@ -190,7 +196,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
     def handle_cleanup_sessions(self):
         """Clean up empty sessions"""
         try:
-            cleanup_count = db.cleanup_empty_sessions()
+            cleanup_count = self.db.cleanup_empty_sessions()
             self.send_json_response({
                 "message": f"Cleaned up {cleanup_count} empty sessions",
                 "cleanup_count": cleanup_count
@@ -203,14 +209,14 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
     def handle_get_session(self, session_id: str):
         """Get a specific session with its messages"""
         try:
-            session = db.get_session(session_id)
+            session = self.db.get_session(session_id)
             if not session:
                 self.send_json_response({
                     "error": "Session not found"
                 }, status_code=404)
                 return
             
-            messages = db.get_messages(session_id)
+            messages = self.db.get_messages(session_id)
             
             self.send_json_response({
                 "session": session,
@@ -224,12 +230,12 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
     def handle_get_session_documents(self, session_id: str):
         """Return documents and basic info for a session."""
         try:
-            session = db.get_session(session_id)
+            session = self.db.get_session(session_id)
             if not session:
                 self.send_json_response({"error": "Session not found"}, status_code=404)
                 return
 
-            docs = db.get_documents_for_session(session_id)
+            docs = self.db.get_documents_for_session(session_id)
 
             # Extract original filenames from stored paths
             filenames = [os.path.basename(p).split('_', 1)[-1] if '_' in os.path.basename(p) else os.path.basename(p) for p in docs]
@@ -252,8 +258,8 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             title = data.get('title', 'New Chat')
             model = data.get('model', 'llama3.2:latest')
             
-            session_id = db.create_session(title, model)
-            session = db.get_session(session_id)
+            session_id = self.db.create_session(title, model)
+            session = self.db.get_session(session_id)
             
             self.send_json_response({
                 "session": session,
@@ -275,7 +281,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         Intelligently routes between direct LLM (fast) and RAG pipeline (document-aware).
         """
         try:
-            session = db.get_session(session_id)
+            session = self.db.get_session(session_id)
             if not session:
                 self.send_json_response({"error": "Session not found"}, status_code=404)
                 return
@@ -291,13 +297,13 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
             if session['message_count'] == 0:
                 title = generate_session_title(message)
-                db.update_session_title(session_id, title)
+                self.db.update_session_title(session_id, title)
 
             # Add user message to database first
-            user_message_id = db.add_message(session_id, message, "user")
+            user_message_id = self.db.add_message(session_id, message, "user")
             
             # 🎯 SMART ROUTING: Decide between direct LLM vs RAG
-            idx_ids = db.get_indexes_for_session(session_id)
+            idx_ids = self.db.get_indexes_for_session(session_id)
             force_rag = bool(data.get("force_rag", False))
             use_rag = True if force_rag else self._should_use_rag(message, idx_ids)
             
@@ -311,9 +317,9 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                 response_text, source_docs = self._handle_direct_llm_query(session_id, message, session)
 
             # Add AI response to database
-            ai_message_id = db.add_message(session_id, response_text, "assistant")
+            ai_message_id = self.db.add_message(session_id, response_text, "assistant")
             
-            updated_session = db.get_session(session_id)
+            updated_session = self.db.get_session(session_id)
             
             # Send response with proper error handling
             self.send_json_response({
@@ -560,7 +566,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
         """
         try:
             # Get conversation history for context
-            conversation_history = db.get_conversation_history(session_id)
+            conversation_history = self.db.get_conversation_history(session_id)
             
             # Use the session's model or default
             model = session.get('model', 'qwen3:8b')  # Default to fast model
@@ -647,7 +653,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
     def handle_delete_session(self, session_id: str):
         """Delete a session and its messages"""
         try:
-            deleted = db.delete_session(session_id)
+            deleted = self.db.delete_session(session_id)
             if deleted:
                 self.send_json_response({'deleted': deleted})
             else:
@@ -657,49 +663,115 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
     
     def handle_file_upload(self, session_id: str):
         """Handle file uploads, save them, and associate with the session."""
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={'REQUEST_METHOD': 'POST', 'CONTENT_TYPE': self.headers['Content-Type']}
-        )
+        try:
+            # Check if session exists
+            session = self.db.get_session(session_id)
+            if not session:
+                self.send_json_response({'error': 'Session not found'}, status_code=404)
+                return
 
-        uploaded_files = []
-        if 'files' in form:
-            files = form['files']
-            if not isinstance(files, list):
-                files = [files]
+            # Parse multipart form data
+            content_type = self.headers.get('Content-Type', '')
+            if not content_type.startswith('multipart/form-data'):
+                self.send_json_response({'error': 'Expected multipart/form-data'}, status_code=400)
+                return
+
+            # Get boundary from content type
+            boundary = None
+            for part in content_type.split(';'):
+                if 'boundary=' in part:
+                    boundary = part.split('boundary=')[1].strip()
+                    break
             
-            upload_dir = "shared_uploads"
-            os.makedirs(upload_dir, exist_ok=True)
+            if not boundary:
+                self.send_json_response({'error': 'No boundary found in Content-Type'}, status_code=400)
+                return
 
-            for file_item in files:
-                if file_item.filename:
-                    # Create a unique filename to avoid overwrites
-                    unique_filename = f"{uuid.uuid4()}_{file_item.filename}"
-                    file_path = os.path.join(upload_dir, unique_filename)
-                    
-                    with open(file_path, 'wb') as f:
-                        f.write(file_item.file.read())
-                    
-                    # Store the absolute path for the indexing service
-                    absolute_file_path = os.path.abspath(file_path)
-                    db.add_document_to_session(session_id, absolute_file_path)
-                    uploaded_files.append({"filename": file_item.filename, "stored_path": absolute_file_path})
+            # Read the entire request body
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self.send_json_response({'error': 'No content'}, status_code=400)
+                return
 
-        if not uploaded_files:
-            self.send_json_response({"error": "No files were uploaded"}, status_code=400)
-            return
+            body = self.rfile.read(content_length)
             
-        self.send_json_response({
-            "message": f"Successfully uploaded {len(uploaded_files)} files.",
-            "uploaded_files": uploaded_files
-        })
+            # Parse multipart data manually
+            uploaded_files = []
+            parts = body.split(f'--{boundary}'.encode())
+            
+            for part in parts[1:-1]:  # Skip first empty and last closing boundary
+                if not part.strip():
+                    continue
+                    
+                # Split headers and content
+                try:
+                    header_end = part.find(b'\r\n\r\n')
+                    if header_end == -1:
+                        continue
+                    
+                    headers_bytes = part[:header_end]
+                    file_content = part[header_end + 4:]  # Skip \r\n\r\n
+                    
+                    # Remove trailing \r\n
+                    if file_content.endswith(b'\r\n'):
+                        file_content = file_content[:-2]
+                    
+                    # Parse Content-Disposition header
+                    headers_str = headers_bytes.decode('utf-8')
+                    filename = None
+                    for line in headers_str.split('\r\n'):
+                        if line.startswith('Content-Disposition:'):
+                            if 'filename=' in line:
+                                # Extract filename
+                                filename_part = line.split('filename=')[1]
+                                filename = filename_part.strip('"').strip("'")
+                                break
+                    
+                    if filename and file_content:
+                        # Create uploads directory if it doesn't exist
+                        upload_dir = f"uploads/session_{session_id}"
+                        os.makedirs(upload_dir, exist_ok=True)
+                        
+                        # Generate unique filename
+                        unique_filename = f"{uuid.uuid4()}_{filename}"
+                        file_path = os.path.join(upload_dir, unique_filename)
+                        
+                        # Save file
+                        with open(file_path, 'wb') as f:
+                            f.write(file_content)
+                        
+                        # Add to database
+                        self.db.add_document_to_session(session_id, file_path)
+                        
+                        uploaded_files.append({
+                            'filename': filename,
+                            'stored_path': file_path,
+                            'size': len(file_content)
+                        })
+                        
+                        print(f"📄 Uploaded {filename} ({len(file_content)} bytes) to session {session_id[:8]}...")
+                        
+                except Exception as e:
+                    print(f"❌ Error processing file part: {e}")
+                    continue
+
+            if uploaded_files:
+                self.send_json_response({
+                    'message': f'Successfully uploaded {len(uploaded_files)} file(s)',
+                    'uploaded_files': uploaded_files
+                })
+            else:
+                self.send_json_response({'error': 'No files were uploaded'}, status_code=400)
+                
+        except Exception as e:
+            print(f"❌ File upload error: {e}")
+            self.send_json_response({'error': f'Upload failed: {str(e)}'}, status_code=500)
 
     def handle_index_documents(self, session_id: str):
         """Triggers indexing for all documents in a session."""
         print(f"🔥 Received request to index documents for session {session_id[:8]}...")
         try:
-            file_paths = db.get_documents_for_session(session_id)
+            file_paths = self.db.get_documents_for_session(session_id)
             if not file_paths:
                 self.send_json_response({"message": "No documents to index for this session."}, status_code=200)
                 return
@@ -717,7 +789,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                     "retrieval_mode": "hybrid",
                 }
                 try:
-                    db.update_index_metadata(session_id, idx_meta)  # session_id used as index_id in text table naming
+                    self.db.update_index_metadata(session_id, idx_meta)  # session_id used as index_id in text table naming
                 except Exception as e:
                     print(f"⚠️ Failed to update index metadata for session index: {e}")
                 self.send_json_response(rag_response.json())
@@ -783,14 +855,14 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
 
     def handle_get_indexes(self):
         try:
-            data = db.list_indexes()
+            data = self.db.list_indexes()
             self.send_json_response({'indexes': data, 'total': len(data)})
         except Exception as e:
             self.send_json_response({'error': str(e)}, status_code=500)
     
     def handle_get_index(self, index_id: str):
         try:
-            data = db.get_index(index_id)
+            data = self.db.get_index(index_id)
             if not data:
                 self.send_json_response({'error': 'Index not found'}, status_code=404)
                 return
@@ -810,6 +882,29 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
             if not name:
                 self.send_json_response({'error': 'Name required'}, status_code=400)
                 return
+            
+            # Make name unique if it already exists
+            original_name = name
+            counter = 1
+            while True:
+                try:
+                    # Try to create index with current name
+                    existing_indexes = self.db.list_indexes()
+                    existing_names = [idx['name'] for idx in existing_indexes]
+                    
+                    if name not in existing_names:
+                        break  # Name is unique, we can use it
+                    
+                    # Name exists, add counter
+                    counter += 1
+                    name = f"{original_name} ({counter})"
+                    
+                    if counter > 100:  # Safety check to prevent infinite loop
+                        self.send_json_response({'error': 'Too many indexes with similar names'}, status_code=400)
+                        return
+                        
+                except Exception:
+                    break  # If there's an error checking names, proceed with current name
             
             # Add complete metadata from RAG system configuration if available
             if RAG_SYSTEM_AVAILABLE and PIPELINE_CONFIGS.get('default'):
@@ -834,35 +929,120 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                 complete_metadata.update(metadata)
                 metadata = complete_metadata
             
-            idx_id = db.create_index(name, description, metadata)
+            idx_id = self.db.create_index(name, description, metadata)
             self.send_json_response({'index_id': idx_id}, status_code=201)
         except Exception as e:
             self.send_json_response({'error': str(e)}, status_code=500)
     
     def handle_index_file_upload(self, index_id: str):
-        """Reuse file upload logic but store docs under index."""
-        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD':'POST', 'CONTENT_TYPE': self.headers['Content-Type']})
-        uploaded_files=[]
-        if 'files' in form:
-            files=form['files']
-            if not isinstance(files, list):
-                files=[files]
-            upload_dir='shared_uploads'
-            os.makedirs(upload_dir, exist_ok=True)
-            for f in files:
-                if f.filename:
-                    unique=f"{uuid.uuid4()}_{f.filename}"
-                    path=os.path.join(upload_dir, unique)
-                    with open(path,'wb') as out: out.write(f.file.read())
-                    db.add_document_to_index(index_id, f.filename, os.path.abspath(path))
-                    uploaded_files.append({'filename':f.filename,'stored_path':os.path.abspath(path)})
-        if not uploaded_files:
-            self.send_json_response({'error':'No files uploaded'}, status_code=400); return
-        self.send_json_response({'message':f"Uploaded {len(uploaded_files)} files","uploaded_files":uploaded_files})
-    
+        """Handle file uploads for an index using modern multipart parsing."""
+        try:
+            # Check if index exists
+            index = self.db.get_index(index_id)
+            if not index:
+                self.send_json_response({'error': 'Index not found'}, status_code=404)
+                return
+
+            # Parse multipart form data
+            content_type = self.headers.get('Content-Type', '')
+            if not content_type.startswith('multipart/form-data'):
+                self.send_json_response({'error': 'Expected multipart/form-data'}, status_code=400)
+                return
+
+            # Get boundary from content type
+            boundary = None
+            for part in content_type.split(';'):
+                if 'boundary=' in part:
+                    boundary = part.split('boundary=')[1].strip()
+                    break
+            
+            if not boundary:
+                self.send_json_response({'error': 'No boundary found in Content-Type'}, status_code=400)
+                return
+
+            # Read the entire request body
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self.send_json_response({'error': 'No content'}, status_code=400)
+                return
+
+            body = self.rfile.read(content_length)
+            
+            # Parse multipart data manually
+            uploaded_files = []
+            parts = body.split(f'--{boundary}'.encode())
+            
+            for part in parts[1:-1]:  # Skip first empty and last closing boundary
+                if not part.strip():
+                    continue
+                    
+                # Split headers and content
+                try:
+                    header_end = part.find(b'\r\n\r\n')
+                    if header_end == -1:
+                        continue
+                    
+                    headers_bytes = part[:header_end]
+                    file_content = part[header_end + 4:]  # Skip \r\n\r\n
+                    
+                    # Remove trailing \r\n
+                    if file_content.endswith(b'\r\n'):
+                        file_content = file_content[:-2]
+                    
+                    # Parse Content-Disposition header
+                    headers_str = headers_bytes.decode('utf-8')
+                    filename = None
+                    for line in headers_str.split('\r\n'):
+                        if line.startswith('Content-Disposition:'):
+                            if 'filename=' in line:
+                                # Extract filename
+                                filename_part = line.split('filename=')[1]
+                                filename = filename_part.strip('"').strip("'")
+                                break
+                    
+                    if filename and file_content:
+                        # Create uploads directory if it doesn't exist
+                        upload_dir = f"uploads/index_{index_id}"
+                        os.makedirs(upload_dir, exist_ok=True)
+                        
+                        # Generate unique filename
+                        unique_filename = f"{uuid.uuid4()}_{filename}"
+                        file_path = os.path.join(upload_dir, unique_filename)
+                        
+                        # Save file
+                        with open(file_path, 'wb') as f:
+                            f.write(file_content)
+                        
+                        # Add to database
+                        self.db.add_document_to_index(index_id, filename, file_path)
+                        
+                        uploaded_files.append({
+                            'filename': filename,
+                            'stored_path': file_path,
+                            'size': len(file_content)
+                        })
+                        
+                        print(f"📄 Uploaded {filename} ({len(file_content)} bytes) to index {index_id[:8]}...")
+                        
+                except Exception as e:
+                    print(f"❌ Error processing file part: {e}")
+                    continue
+
+            if uploaded_files:
+                self.send_json_response({
+                    'message': f'Successfully uploaded {len(uploaded_files)} file(s)',
+                    'uploaded_files': uploaded_files
+                })
+            else:
+                self.send_json_response({'error': 'No files were uploaded'}, status_code=400)
+                
+        except Exception as e:
+            print(f"❌ File upload error: {e}")
+            self.send_json_response({'error': f'Upload failed: {str(e)}'}, status_code=500)
+
     def handle_build_index(self, index_id: str):
         try:
-            index=db.get_index(index_id)
+            index=self.db.get_index(index_id)
             if not index:
                 self.send_json_response({'error':'Index not found'}, status_code=404); return
             file_paths=[d['stored_path'] for d in index.get('documents',[])]
@@ -959,7 +1139,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                 if overview_model:
                     meta_updates["overview_model"] = overview_model
                 try:
-                    db.update_index_metadata(index_id, meta_updates)
+                    self.db.update_index_metadata(index_id, meta_updates)
                 except Exception as e:
                     print(f"⚠️ Failed to update index metadata: {e}")
 
@@ -987,25 +1167,25 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
     
     def handle_link_index_to_session(self, session_id: str, index_id: str):
         try:
-            db.link_index_to_session(session_id, index_id)
+            self.db.link_index_to_session(session_id, index_id)
             self.send_json_response({'message':'Index linked to session'})
         except Exception as e:
             self.send_json_response({'error':str(e)}, status_code=500)
 
     def handle_get_session_indexes(self, session_id: str):
         try:
-            idx_ids = db.get_indexes_for_session(session_id)
+            idx_ids = self.db.get_indexes_for_session(session_id)
             indexes = []
             for idx_id in idx_ids:
-                idx = db.get_index(idx_id)
+                idx = self.db.get_index(idx_id)
                 if idx:
                     # Try to populate metadata for older indexes that have empty metadata
                     if not idx.get('metadata') or len(idx['metadata']) == 0:
                         print(f"🔍 Attempting to infer metadata for index {idx_id[:8]}...")
-                        inferred_metadata = db.inspect_and_populate_index_metadata(idx_id)
+                        inferred_metadata = self.db.inspect_and_populate_index_metadata(idx_id)
                         if inferred_metadata:
                             # Refresh the index data with the new metadata
-                            idx = db.get_index(idx_id)
+                            idx = self.db.get_index(idx_id)
                     indexes.append(idx)
             self.send_json_response({'indexes': indexes, 'total': len(indexes)})
         except Exception as e:
@@ -1014,7 +1194,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
     def handle_delete_index(self, index_id: str):
         """Remove an index, its documents, links, and the underlying LanceDB table."""
         try:
-            deleted = db.delete_index(index_id)
+            deleted = self.db.delete_index(index_id)
             if deleted:
                 self.send_json_response({'message': 'Index deleted successfully', 'index_id': index_id})
             else:
@@ -1025,7 +1205,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
     def handle_rename_session(self, session_id: str):
         """Rename an existing session title"""
         try:
-            session = db.get_session(session_id)
+            session = self.db.get_session(session_id)
             if not session:
                 self.send_json_response({"error": "Session not found"}, status_code=404)
                 return
@@ -1043,8 +1223,8 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                 self.send_json_response({"error": "Title cannot be empty"}, status_code=400)
                 return
 
-            db.update_session_title(session_id, new_title)
-            updated_session = db.get_session(session_id)
+            self.db.update_session_title(session_id, new_title)
+            updated_session = self.db.get_session(session_id)
 
             self.send_json_response({
                 "message": "Session renamed successfully",
@@ -1084,6 +1264,12 @@ def main():
     PORT = 8000  # 🆕 Define port
     try:
         # Initialize the database
+        # Instantiate ChatDatabase here and pass it to ChatHandler, or make it a global accessible by main and handler
+        # Option 1: Global instance (simpler for this server structure)
+        db_path_env = os.getenv("LOCALGPT_DB_PATH")
+        if not db_path_env:
+            raise ValueError("LOCALGPT_DB_PATH environment variable not set for backend/server.py main function")
+        global_db = ChatDatabase(db_path=db_path_env)
         print("✅ Database initialized successfully")
 
         # Initialize the PDF processor
@@ -1108,7 +1294,7 @@ def main():
         
         # Cleanup empty sessions on startup
         print("🧹 Cleaning up empty sessions...")
-        cleanup_count = db.cleanup_empty_sessions()
+        cleanup_count = global_db.cleanup_empty_sessions() # Modified: Use global_db
         if cleanup_count > 0:
             print(f"✨ Cleaned up {cleanup_count} empty sessions")
         else:

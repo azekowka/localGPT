@@ -108,7 +108,7 @@ class ServiceManager:
         """Setup centralized logging with colors."""
         # Create main logger
         self.logger = logging.getLogger('system')
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG) # Changed to DEBUG to see PATH variable
         
         # Console handler with colors
         console_handler = logging.StreamHandler(sys.stdout)
@@ -116,7 +116,7 @@ class ServiceManager:
         self.logger.addHandler(console_handler)
         
         # File handler for system logs
-        file_handler = logging.FileHandler(self.logs_dir / 'system.log')
+        file_handler = logging.FileHandler(self.logs_dir / 'system.log', encoding='utf-8') # Set encoding for file output
         file_handler.setFormatter(logging.Formatter(
             '%(asctime)s [%(levelname)s] %(message)s'
         ))
@@ -148,7 +148,7 @@ class ServiceManager:
             ),
             'frontend': ServiceConfig(
                 name='frontend',
-                command=['npm', 'run', 'dev' if self.mode == 'dev' else 'start'],
+                command=['C:/Users/Sulpak/AppData/Local/pnpm/pnpm.CMD', 'run', 'dev' if self.mode == 'dev' else 'start'],
                 port=3000,
                 startup_delay=5,
                 required=False  # Optional in case Node.js not available
@@ -158,7 +158,7 @@ class ServiceManager:
         # Production mode adjustments
         if self.mode == 'prod':
             # Use production build for frontend
-            base_configs['frontend'].command = ['npm', 'run', 'start']
+            base_configs['frontend'].command = ['C:/Users/Sulpak/AppData/Local/pnpm/pnpm.CMD', 'run', 'start']
             # Add production environment variables
             base_configs['rag-api'].env = {'NODE_ENV': 'production'}
             base_configs['backend'].env = {'NODE_ENV': 'production'}
@@ -188,6 +188,9 @@ class ServiceManager:
         """Check if all required tools are available."""
         self.logger.info("🔍 Checking prerequisites...")
         
+        # DEBUG: Print the PATH environment variable that the script sees
+        self.logger.debug(f"DEBUG: PATH environment variable: {os.environ.get('PATH')}")
+        
         missing_tools = []
         
         # Check Ollama
@@ -199,8 +202,8 @@ class ServiceManager:
             missing_tools.append('python')
         
         # Check Node.js (optional)
-        if not self._command_exists('npm'):
-            self.logger.warning("⚠️  npm not found - frontend will be disabled")
+        if not self._command_exists('C:/Users/Sulpak/AppData/Local/pnpm/pnpm.CMD'):
+            self.logger.warning("⚠️  pnpm not found - frontend will be disabled")
             self.services['frontend'].required = False
         
         if missing_tools:
@@ -264,6 +267,32 @@ class ServiceManager:
             if config.env:
                 env.update(config.env)
             
+            # Set PYTHONIOENCODING for Unicode support in subprocesses
+            env['PYTHONIOENCODING'] = 'utf-8'
+
+            # Activate virtual environment for Python services
+            if service_name in ['rag-api', 'backend']:
+                # Get the absolute path to the project root
+                project_root = Path(__file__).resolve().parent
+                venv_path = project_root / '.venv'
+
+                if sys.platform == "win32":
+                    venv_scripts_path = venv_path / "Scripts"
+                else:
+                    venv_scripts_path = venv_path / "bin"
+                
+                if venv_scripts_path.exists():
+                    self.logger.debug(f"Activating virtual environment at {venv_scripts_path}")
+                    # Prepend venv scripts path to PATH
+                    env['PATH'] = str(venv_scripts_path) + os.pathsep + env.get('PATH', '')
+                else:
+                    self.logger.warning(f"Virtual environment scripts not found at {venv_scripts_path}. Skipping activation for {service_name}")
+
+                # Explicitly pass the database path for rag-api and backend
+                db_file_path = project_root / "chat_data.db"
+                env['LOCALGPT_DB_PATH'] = str(db_file_path)
+                self.logger.debug(f"Set LOCALGPT_DB_PATH to: {env['LOCALGPT_DB_PATH']}")
+                
             # Start process
             process = subprocess.Popen(
                 config.command,

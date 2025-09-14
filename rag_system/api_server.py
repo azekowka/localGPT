@@ -17,8 +17,11 @@ from rag_system.main import get_agent
 from rag_system.factory import get_indexing_pipeline
 
 # Initialize database connection once at module level
-# Use auto-detection for environment-appropriate path
-db = ChatDatabase()
+# Get database path from environment variable set by run_system.py
+db_path_env = os.getenv("LOCALGPT_DB_PATH")
+if not db_path_env:
+    raise ValueError("LOCALGPT_DB_PATH environment variable not set for rag_system.api_server")
+db = ChatDatabase(db_path=db_path_env)
 
 # Get the desired agent mode from environment variables, defaulting to 'default'
 # This allows us to easily switch between 'default', 'fast', 'react', etc.
